@@ -32,6 +32,8 @@ use pravega_client::client_factory::ClientFactory;
 const START_CONSTANT: i32 = 95;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
+    env::set_var("RUST_BACKTRACE", "1");
+
     // Getting the workload file configuration form command line parameters
     let args: Vec<String> = env::args().collect();
     if args.len() <= 1 {
@@ -135,17 +137,17 @@ fn get_stream_config(conf: Config, scope: Scope) -> StreamConfiguration {
     stream_config
 }
 
-async fn write_one_event(arc_event_writer: Arc<Mutex<EventWriter>>, payload: Vec<u8>) -> f64 {
+async fn write_one_event(arc_event_writer: Arc<Mutex<EventWriter>>, payload: Vec<u8>) -> Result<f64, std::io::Error> {
     let mut event_writer = arc_event_writer.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
     let start_time = Utc::now();
     let result = event_writer.write_event(payload).await;
     if !result.await.is_ok() {
-        return -1.0
+        return Ok(-1.0)
     }
 
     let end_time = Utc::now();
     let latency = get_difference(start_time, end_time);
-    latency
+    return Ok(latency)
 }
 
 fn sender_handler(signal: mpsc::Sender<i32>, out: mpsc::Sender<ChannelData>, conf: Config) {
@@ -184,7 +186,7 @@ fn sender_handler(signal: mpsc::Sender<i32>, out: mpsc::Sender<ChannelData>, con
         for i in 1..=conf.message_warmup {
             let payload          = payload.clone();
             let arc_event_writer = Arc::clone(&shared_event_writer);
-            write_one_event(arc_event_writer, payload).await;
+            let _ = write_one_event(arc_event_writer, payload).await;
             if i % conf.producer_rate == 0 {
                 thread::sleep(Duration::from_secs(1));
             }
@@ -205,8 +207,11 @@ fn sender_handler(signal: mpsc::Sender<i32>, out: mpsc::Sender<ChannelData>, con
             let payload_cloned   = payload.clone();
             let arc_event_writer = Arc::clone(&shared_event_writer);
             pool.execute(move || {
-                let latency = task::block_on( write_one_event(arc_event_writer, payload_cloned) );
-                out_cloned.send(ChannelData::WriteLatency(latency)).unwrap();
+                let res = task::block_on( write_one_event(arc_event_writer, payload_cloned) );
+                match res {
+                    Ok(value) => out_cloned.send(ChannelData::WriteLatency(value)).unwrap(),
+                    Err(_) => println!("\t + Error at sending")
+                };
             });
             if i % conf.producer_rate == 0 {
                 println!("\t + Messages Sent {}", i);
